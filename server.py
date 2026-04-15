@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-import http.server, json, os, re, shutil, subprocess, tempfile, threading, traceback, uuid
+import http.server, json, os, shutil, subprocess, tempfile, threading, traceback, uuid, zipfile
 from urllib.parse import urlparse
 
-PORT  = int(os.environ.get("PORT", 8765))
+PORT   = int(os.environ.get("PORT", 8765))
 FFMPEG = shutil.which("ffmpeg") or "/usr/bin/ffmpeg"
 HTML_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "videocutter.html")
 
-JOBS  = {}   # job_id  -> dict
-FILES = {}   # file_id -> path
-RECENT_ERRORS = []  # last 20 errors for /debug
+JOBS  = {}
+FILES = {}
+RECENT_ERRORS = []
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -34,7 +34,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.cors()
         self.end_headers()
 
-    # ── GET ──────────────────────────────────────────────────────────────────
     def do_GET(self):
         path = urlparse(self.path).path
 
@@ -58,28 +57,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not job or job["status"] != "done" or not os.path.exists(job.get("output", "")):
                 self.send_json(404, {"error": "arquivo não disponível"})
                 return
-            out = job["output"]
-            size = os.path.getsize(out)
+            out    = job["output"]
+            is_zip = job.get("output_type") == "zip"
+            size   = os.path.getsize(out)
             self.send_response(200)
-            self.send_header("Content-Type", "video/mp4")
+            self.send_header("Content-Type", "application/zip" if is_zip else "video/mp4")
             self.send_header("Content-Length", size)
-            self.send_header("Content-Disposition", 'attachment; filename="video_final.mp4"')
+            fname = "cortes.zip" if is_zip else "video_final.mp4"
+            self.send_header("Content-Disposition", f'attachment; filename="{fname}"')
             self.cors()
             self.end_headers()
             with open(out, "rb") as f:
                 shutil.copyfileobj(f, self.wfile)
 
         elif path == "/debug":
-            self.send_json(200, {"errors": RECENT_ERRORS, "jobs": {k: v for k, v in list(JOBS.items())[-10:]}})
+            self.send_json(200, {
+                "errors": RECENT_ERRORS,
+                "jobs": {k: {kk: vv for kk, vv in v.items() if kk != "output"} for k, v in list(JOBS.items())[-10:]}
+            })
 
         else:
             self.send_json(404, {"error": "não encontrado"})
 
-    # ── POST ─────────────────────────────────────────────────────────────────
     def do_POST(self):
         path = urlparse(self.path).path
 
-        # Upload de um arquivo (stream direto para disco — não bufferiza em RAM)
         if path == "/upload":
             length   = int(self.headers.get("Content-Length", 0))
             filename = self.headers.get("X-Filename", "video.mp4")
@@ -99,7 +101,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             FILES[file_id] = tmp_path
             self.send_json(200, {"file_id": file_id})
 
-        # Inicia processamento
         elif path == "/process":
             length = int(self.headers.get("Content-Length", 0))
             try:
@@ -109,63 +110,64 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
 
             clips = data.get("clips", [])
+            mode  = data.get("mode", "join")  # "join" | "separate"
             if not clips:
                 self.send_json(400, {"error": "nenhum clipe"})
                 return
 
-            # Resolve file_id → path
             clips_data = []
             for c in clips:
                 fpath = FILES.get(c.get("file_id"))
                 if not fpath or not os.path.exists(fpath):
                     self.send_json(400, {"error": f"arquivo não encontrado: {c.get('file_id')}"})
                     return
-                clips_data.append({"path": fpath, "start": c["start"], "end": c["end"],
-                                   "width": c.get("width", 0), "height": c.get("height", 0)})
+                clips_data.append({
+                    "path": fpath, "start": c["start"], "end": c["end"],
+                    "width": c.get("width", 0), "height": c.get("height", 0),
+                })
 
             job_id = str(uuid.uuid4())
-            JOBS[job_id] = {"status": "queued", "progress": 0, "message": "Aguardando…", "output": None}
-            threading.Thread(target=run_job, args=(job_id, clips_data), daemon=True).start()
+            JOBS[job_id] = {
+                "status": "queued", "progress": 0, "message": "Aguardando…",
+                "output": None, "output_type": "zip" if mode == "separate" else "mp4",
+            }
+            threading.Thread(target=run_job, args=(job_id, clips_data, mode), daemon=True).start()
             self.send_json(200, {"job_id": job_id})
 
         else:
             self.send_json(404, {"error": "rota não encontrada"})
 
 
-def run_job(job_id, clips):
+def run_job(job_id, clips, mode="join"):
     job    = JOBS[job_id]
     tmpdir = tempfile.mkdtemp(prefix="vcjob_")
     segs   = []
     total  = len(clips)
 
     try:
-        # Use dimensions reported by the browser (videoWidth/videoHeight)
-        tw = int(clips[0].get("width") or 1280)
+        tw = int(clips[0].get("width")  or 1280)
         th = int(clips[0].get("height") or 720)
-
-        # Make dimensions even (required by libx264)
         tw = tw if tw % 2 == 0 else tw - 1
         th = th if th % 2 == 0 else th - 1
 
-        print(f"[job {job_id[:8]}] target={tw}x{th}, clips={total}", flush=True)
+        print(f"[job {job_id[:8]}] mode={mode} target={tw}x{th} clips={total}", flush=True)
 
         for i, clip in enumerate(clips):
             src   = clip["path"]
             start = float(clip["start"])
             end   = float(clip["end"])
-            out   = os.path.join(tmpdir, f"seg_{i}.mp4")
+            out   = os.path.join(tmpdir, f"seg_{i:03d}.mp4")
             segs.append(out)
 
             job["status"]   = "running"
             job["progress"] = 5 + int(i / total * 80)
-            job["message"]  = f"Cortando clipe {i+1}/{total}…"
+            job["message"]  = f"Cortando trecho {i+1}/{total}…"
 
             vf = (
                 f"scale={tw}:{th}:force_original_aspect_ratio=decrease,"
                 f"pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2:color=black,"
                 f"setsar=1"
             )
-
             cmd = [
                 FFMPEG, "-y",
                 "-ss", str(start), "-to", str(end),
@@ -177,42 +179,50 @@ def run_job(job_id, clips):
                 "-reset_timestamps", "1",
                 out,
             ]
-            print(f"[job {job_id[:8]}] seg {i}: {' '.join(cmd)}", flush=True)
-
+            print(f"[job {job_id[:8]}] seg {i}: ss={start} to={end}", flush=True)
             r = subprocess.run(cmd, capture_output=True)
-
             if r.returncode != 0:
                 err = r.stderr.decode("utf-8", errors="replace")
-                print(f"[job {job_id[:8]}] FFmpeg error seg {i}:\n{err}", flush=True)
+                print(f"[job {job_id[:8]}] FFmpeg error:\n{err}", flush=True)
                 raise RuntimeError(err[-1200:])
 
         job["progress"] = 88
-        job["message"]  = "Unindo clipes…"
 
-        if total == 1:
-            final = segs[0]
+        if mode == "separate":
+            job["message"] = "Compactando arquivos…"
+            zip_path = os.path.join(tmpdir, "cortes.zip")
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                for i, seg in enumerate(segs):
+                    zf.write(seg, f"corte_{i+1:02d}.mp4")
+            size_mb = os.path.getsize(zip_path) / 1024 / 1024
+            job.update(status="done", progress=100,
+                       message=f"{total} corte{'s' if total>1 else ''} • {size_mb:.1f} MB",
+                       output=zip_path, output_type="zip")
+
         else:
-            lst = os.path.join(tmpdir, "list.txt")
-            with open(lst, "w") as f:
-                for s in segs:
-                    f.write(f"file '{s}'\n")
-            final = os.path.join(tmpdir, "output.mp4")
-            cmd2 = [
-                FFMPEG, "-y", "-f", "concat", "-safe", "0",
-                "-i", lst, "-c", "copy", final,
-            ]
-            print(f"[job {job_id[:8]}] concat: {' '.join(cmd2)}", flush=True)
-            r2 = subprocess.run(cmd2, capture_output=True)
-            if r2.returncode != 0:
-                err2 = r2.stderr.decode("utf-8", errors="replace")
-                print(f"[job {job_id[:8]}] FFmpeg concat error:\n{err2}", flush=True)
-                raise RuntimeError(err2[-1200:])
+            job["message"] = "Unindo trechos…"
+            if total == 1:
+                final = segs[0]
+            else:
+                lst = os.path.join(tmpdir, "list.txt")
+                with open(lst, "w") as f:
+                    for s in segs:
+                        f.write(f"file '{s}'\n")
+                final = os.path.join(tmpdir, "output.mp4")
+                r2 = subprocess.run([
+                    FFMPEG, "-y", "-f", "concat", "-safe", "0",
+                    "-i", lst, "-c", "copy", final,
+                ], capture_output=True)
+                if r2.returncode != 0:
+                    err2 = r2.stderr.decode("utf-8", errors="replace")
+                    print(f"[job {job_id[:8]}] concat error:\n{err2}", flush=True)
+                    raise RuntimeError(err2[-1200:])
+            size_mb = os.path.getsize(final) / 1024 / 1024
+            job.update(status="done", progress=100,
+                       message=f"{total} trecho{'s' if total>1 else ''} • {size_mb:.1f} MB",
+                       output=final, output_type="mp4")
 
-        size_mb = os.path.getsize(final) / 1024 / 1024
-        job.update(status="done", progress=100,
-                   message=f"{total} clipe{'s' if total>1 else ''} • {size_mb:.1f} MB",
-                   output=final)
-        print(f"[job {job_id[:8]}] done, {size_mb:.1f} MB", flush=True)
+        print(f"[job {job_id[:8]}] done", flush=True)
 
     except Exception as e:
         tb = traceback.format_exc()
