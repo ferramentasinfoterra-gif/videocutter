@@ -143,13 +143,13 @@ h1 span{color:var(--text3)}
     <h1>Video<span>Cutter</span></h1>
     <div class="badge">
       <div class="badge-dot"></div>
-      <span>FFmpeg local</span>
+      <span>FFmpeg na nuvem</span>
     </div>
   </header>
 
   <div class="notice">
-    ⚡ Usa o FFmpeg instalado no seu Mac — rápido e sem limite de tamanho.
-    Vídeos <strong>nunca saem do seu computador</strong>.
+    ⚡ Processado pelo servidor — sem precisar instalar nada.
+    Vídeos ficam apenas temporariamente no servidor e são apagados após o download.
   </div>
 
   <div id="dropzone" onclick="triggerPick()"
@@ -231,6 +231,8 @@ function addClip(file) {
   v.onloadedmetadata = () => {
     clip.duration = v.duration || 0;
     clip.end = v.duration || 0;
+    clip.width  = v.videoWidth  || 0;
+    clip.height = v.videoHeight || 0;
     URL.revokeObjectURL(url);
     render();
     updateBtn();

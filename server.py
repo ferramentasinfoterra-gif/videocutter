@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import http.server, json, os, re, shutil, subprocess, tempfile, threading, uuid
+import http.server, json, os, re, shutil, subprocess, tempfile, threading, traceback, uuid
 from urllib.parse import urlparse
 
 PORT  = int(os.environ.get("PORT", 8765))
@@ -8,6 +8,7 @@ HTML_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "videocutte
 
 JOBS  = {}   # job_id  -> dict
 FILES = {}   # file_id -> path
+RECENT_ERRORS = []  # last 20 errors for /debug
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -67,6 +68,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             with open(out, "rb") as f:
                 shutil.copyfileobj(f, self.wfile)
+
+        elif path == "/debug":
+            self.send_json(200, {"errors": RECENT_ERRORS, "jobs": {k: v for k, v in list(JOBS.items())[-10:]}})
 
         else:
             self.send_json(404, {"error": "não encontrado"})
@@ -128,17 +132,45 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json(404, {"error": "rota não encontrada"})
 
 
+def get_video_dimensions(path):
+    """Use ffprobe to get video width and height."""
+    r = subprocess.run([
+        "ffprobe", "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height",
+        "-of", "csv=s=x:p=0",
+        path
+    ], capture_output=True, text=True)
+    if r.returncode == 0 and r.stdout.strip():
+        parts = r.stdout.strip().split("x")
+        if len(parts) == 2:
+            try:
+                return int(parts[0]), int(parts[1])
+            except ValueError:
+                pass
+    return None, None
+
+
 def run_job(job_id, clips):
     job    = JOBS[job_id]
     tmpdir = tempfile.mkdtemp(prefix="vcjob_")
     segs   = []
     total  = len(clips)
 
-    # Resolução alvo = primeiro clipe
-    tw = clips[0].get("width")  or 1280
-    th = clips[0].get("height") or 720
-
     try:
+        # Detect target resolution from first clip's actual video stream
+        # (fall back to what frontend reported, then to 1280x720)
+        tw, th = get_video_dimensions(clips[0]["path"])
+        if not tw:
+            tw = int(clips[0].get("width") or 1280)
+            th = int(clips[0].get("height") or 720)
+
+        # Make dimensions even (required by libx264)
+        tw = tw if tw % 2 == 0 else tw - 1
+        th = th if th % 2 == 0 else th - 1
+
+        print(f"[job {job_id[:8]}] target={tw}x{th}, clips={total}", flush=True)
+
         for i, clip in enumerate(clips):
             src   = clip["path"]
             start = float(clip["start"])
@@ -150,10 +182,13 @@ def run_job(job_id, clips):
             job["progress"] = 5 + int(i / total * 80)
             job["message"]  = f"Cortando clipe {i+1}/{total}…"
 
-            vf = (f"scale={tw}:{th}:force_original_aspect_ratio=decrease,"
-                  f"pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1")
+            vf = (
+                f"scale={tw}:{th}:force_original_aspect_ratio=decrease,"
+                f"pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2:color=black,"
+                f"setsar=1"
+            )
 
-            r = subprocess.run([
+            cmd = [
                 FFMPEG, "-y",
                 "-ss", str(start), "-to", str(end),
                 "-i", src,
@@ -163,10 +198,15 @@ def run_job(job_id, clips):
                 "-avoid_negative_ts", "make_zero",
                 "-reset_timestamps", "1",
                 out,
-            ], capture_output=True)
+            ]
+            print(f"[job {job_id[:8]}] seg {i}: {' '.join(cmd)}", flush=True)
+
+            r = subprocess.run(cmd, capture_output=True)
 
             if r.returncode != 0:
-                raise RuntimeError(r.stderr.decode("utf-8", errors="replace")[-800:])
+                err = r.stderr.decode("utf-8", errors="replace")
+                print(f"[job {job_id[:8]}] FFmpeg error seg {i}:\n{err}", flush=True)
+                raise RuntimeError(err[-1200:])
 
         job["progress"] = 88
         job["message"]  = "Unindo clipes…"
@@ -176,22 +216,33 @@ def run_job(job_id, clips):
         else:
             lst = os.path.join(tmpdir, "list.txt")
             with open(lst, "w") as f:
-                f.writelines(f"file '{s}'\n" for s in segs)
+                for s in segs:
+                    f.write(f"file '{s}'\n")
             final = os.path.join(tmpdir, "output.mp4")
-            r2 = subprocess.run([
+            cmd2 = [
                 FFMPEG, "-y", "-f", "concat", "-safe", "0",
                 "-i", lst, "-c", "copy", final,
-            ], capture_output=True)
+            ]
+            print(f"[job {job_id[:8]}] concat: {' '.join(cmd2)}", flush=True)
+            r2 = subprocess.run(cmd2, capture_output=True)
             if r2.returncode != 0:
-                raise RuntimeError(r2.stderr.decode("utf-8", errors="replace")[-800:])
+                err2 = r2.stderr.decode("utf-8", errors="replace")
+                print(f"[job {job_id[:8]}] FFmpeg concat error:\n{err2}", flush=True)
+                raise RuntimeError(err2[-1200:])
 
         size_mb = os.path.getsize(final) / 1024 / 1024
         job.update(status="done", progress=100,
                    message=f"{total} clipe{'s' if total>1 else ''} • {size_mb:.1f} MB",
                    output=final)
+        print(f"[job {job_id[:8]}] done, {size_mb:.1f} MB", flush=True)
 
     except Exception as e:
-        job.update(status="error", message=str(e))
+        tb = traceback.format_exc()
+        print(f"[job {job_id[:8]}] EXCEPTION:\n{tb}", flush=True)
+        RECENT_ERRORS.append({"job": job_id, "error": str(e)})
+        if len(RECENT_ERRORS) > 20:
+            RECENT_ERRORS.pop(0)
+        job.update(status="error", message=str(e)[-500:])
 
 
 print(f"▶  VideoCutter → http://localhost:{PORT}")
