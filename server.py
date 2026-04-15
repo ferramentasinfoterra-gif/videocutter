@@ -132,25 +132,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json(404, {"error": "rota não encontrada"})
 
 
-def get_video_dimensions(path):
-    """Use ffprobe to get video width and height."""
-    r = subprocess.run([
-        "ffprobe", "-v", "error",
-        "-select_streams", "v:0",
-        "-show_entries", "stream=width,height",
-        "-of", "csv=s=x:p=0",
-        path
-    ], capture_output=True, text=True)
-    if r.returncode == 0 and r.stdout.strip():
-        parts = r.stdout.strip().split("x")
-        if len(parts) == 2:
-            try:
-                return int(parts[0]), int(parts[1])
-            except ValueError:
-                pass
-    return None, None
-
-
 def run_job(job_id, clips):
     job    = JOBS[job_id]
     tmpdir = tempfile.mkdtemp(prefix="vcjob_")
@@ -158,12 +139,9 @@ def run_job(job_id, clips):
     total  = len(clips)
 
     try:
-        # Detect target resolution from first clip's actual video stream
-        # (fall back to what frontend reported, then to 1280x720)
-        tw, th = get_video_dimensions(clips[0]["path"])
-        if not tw:
-            tw = int(clips[0].get("width") or 1280)
-            th = int(clips[0].get("height") or 720)
+        # Use dimensions reported by the browser (videoWidth/videoHeight)
+        tw = int(clips[0].get("width") or 1280)
+        th = int(clips[0].get("height") or 720)
 
         # Make dimensions even (required by libx264)
         tw = tw if tw % 2 == 0 else tw - 1
@@ -194,7 +172,7 @@ def run_job(job_id, clips):
                 "-i", src,
                 "-vf", vf,
                 "-c:v", "libx264", "-c:a", "aac",
-                "-preset", "fast", "-crf", "23",
+                "-preset", "ultrafast", "-crf", "23",
                 "-avoid_negative_ts", "make_zero",
                 "-reset_timestamps", "1",
                 out,
