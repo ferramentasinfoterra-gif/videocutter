@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>VideoCutter</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:wght@400;500;600;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#09090c;--bg2:#111116;--bg3:#18181f;--bg4:#1f1f28;
+  --border:rgba(255,255,255,0.06);--border2:rgba(255,255,255,0.11);
+  --accent:#e8ff47;--accent-dim:rgba(232,255,71,0.12);--accent-glow:rgba(232,255,71,0.25);
+  --text:#eeeef5;--text2:#8888a0;--text3:#44445a;
+  --green:#4ade80;--red:#f87171;
+  --r:10px;--r2:14px;
+  --fh:'Familjen Grotesk',sans-serif;--fm:'DM Mono',monospace;
+}
+html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--fh);font-size:14px;overflow-x:hidden}
+body::before{content:'';position:fixed;inset:0;
+  background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.035'/%3E%3C/svg%3E");
+  background-size:200px;pointer-events:none;z-index:0;opacity:.6}
+.wrap{max-width:780px;margin:0 auto;padding:40px 20px 80px;position:relative;z-index:1}
+
+/* header */
+header{display:flex;align-items:center;gap:14px;margin-bottom:40px}
+.logo{width:40px;height:40px;background:var(--accent);border-radius:10px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.logo svg{width:20px;height:20px}
+h1{font-size:22px;font-weight:700;letter-spacing:-.01em}
+h1 span{color:var(--text3)}
+.badge{margin-left:auto;font-family:var(--fm);font-size:11px;padding:4px 10px;border-radius:99px;
+  background:var(--bg3);border:1px solid var(--border2);color:var(--text2);
+  display:flex;align-items:center;gap:6px;white-space:nowrap}
+.badge-dot{width:6px;height:6px;border-radius:50%;background:var(--green)}
+
+/* notice */
+.notice{background:rgba(232,255,71,.07);border:1px solid rgba(232,255,71,.2);border-radius:var(--r);
+  padding:10px 14px;font-size:11px;color:rgba(232,255,71,.8);margin-bottom:16px;line-height:1.5}
+
+/* dropzone */
+#dropzone{border:1.5px dashed var(--border2);border-radius:var(--r2);padding:40px 20px;
+  text-align:center;cursor:pointer;background:var(--bg2);transition:all .2s;margin-bottom:20px;
+  position:relative;overflow:hidden}
+#dropzone::after{content:'';position:absolute;inset:0;
+  background:radial-gradient(ellipse at 50% 0%,rgba(232,255,71,.06) 0%,transparent 65%);
+  pointer-events:none}
+#dropzone:hover,#dropzone.over{border-color:var(--accent);background:var(--accent-dim)}
+#dropzone:hover .dz-icon,#dropzone.over .dz-icon{transform:scale(1.1) rotate(-5deg)}
+.dz-icon{font-size:36px;margin-bottom:12px;display:block;transition:transform .2s}
+.dz-title{font-size:16px;font-weight:600;margin-bottom:6px}
+.dz-sub{font-size:12px;color:var(--text3)}
+.dz-sub strong{color:var(--accent);font-weight:500}
+
+/* clips */
+#clips{margin-bottom:20px}
+.clip-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r2);
+  padding:16px;margin-bottom:10px;display:grid;grid-template-columns:1fr auto;gap:12px;
+  align-items:start;animation:enter .18s ease;transition:border-color .15s}
+.clip-card:hover{border-color:var(--border2)}
+@keyframes enter{from{opacity:0;transform:translateY(-5px)}to{opacity:1;transform:none}}
+.clip-top{display:flex;align-items:center;gap:8px;margin-bottom:12px}
+.clip-num{font-family:var(--fm);font-size:11px;color:var(--accent);background:var(--accent-dim);
+  border-radius:5px;padding:2px 7px;flex-shrink:0}
+.clip-name{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.clip-dur{font-family:var(--fm);font-size:11px;color:var(--text3);margin-left:auto;flex-shrink:0}
+.clip-times{display:flex;align-items:center;gap:10px}
+.tf{display:flex;flex-direction:column;gap:5px;flex:1}
+.tf label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.1em;font-family:var(--fm)}
+.ti-row{display:flex;align-items:center;gap:3px}
+.ts{background:var(--bg4);border:1px solid var(--border);border-radius:7px;color:var(--text);
+  font-family:var(--fm);font-size:13px;padding:6px 8px;width:44px;text-align:center;
+  outline:none;transition:border-color .15s}
+.ts:focus{border-color:var(--accent)}
+.ts-sep{color:var(--text3);font-size:14px;padding-bottom:1px}
+.ts-ms{width:36px;font-size:11px}
+.arrow{color:var(--text3);font-size:16px;padding:0 2px;margin-top:18px}
+.clip-sel{font-family:var(--fm);font-size:10px;color:var(--text3);margin-top:8px}
+.clip-sel b{color:var(--accent)}
+.range-bar{height:3px;background:var(--bg4);border-radius:99px;margin-top:10px;overflow:hidden}
+.range-fill{height:100%;background:var(--accent);border-radius:99px;transition:all .2s}
+.clip-actions{display:flex;flex-direction:column;gap:4px;padding-top:2px}
+.btn-sm{width:30px;height:30px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;
+  cursor:pointer;display:flex;align-items:center;justify-content:center;color:var(--text2);
+  transition:all .15s;font-size:13px}
+.btn-sm:hover{background:var(--bg4);color:var(--text)}
+.btn-sm.del:hover{border-color:var(--red);color:var(--red);background:rgba(248,113,113,.1)}
+.btn-sm.dup:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-dim)}
+
+/* footer */
+#footer{position:fixed;bottom:0;left:0;right:0;
+  background:linear-gradient(to top,var(--bg) 70%,transparent);padding:16px 20px 20px;z-index:10}
+.footer-inner{max-width:780px;margin:0 auto;display:flex;flex-direction:column;gap:10px}
+.prog-wrap{display:none}
+.prog-wrap.on{display:flex;flex-direction:column;gap:6px}
+.prog-bar{height:3px;background:var(--bg3);border-radius:99px;overflow:hidden}
+.prog-fill{height:100%;background:var(--accent);border-radius:99px;width:0;transition:width .4s ease}
+.prog-lbl{display:flex;justify-content:space-between;font-size:11px;font-family:var(--fm);color:var(--text3)}
+#btn-go{width:100%;padding:14px;background:var(--accent);border:none;border-radius:var(--r);
+  color:#09090c;font-family:var(--fh);font-size:15px;font-weight:700;letter-spacing:.02em;
+  cursor:pointer;transition:all .2s}
+#btn-go:hover:not(:disabled){filter:brightness(1.1);transform:translateY(-1px);box-shadow:0 10px 30px var(--accent-glow)}
+#btn-go:active:not(:disabled){transform:none}
+#btn-go:disabled{opacity:.3;cursor:not-allowed}
+
+/* toast */
+#toast{position:fixed;bottom:90px;left:50%;transform:translateX(-50%) translateY(12px);
+  background:var(--bg3);border:1px solid var(--border2);border-radius:var(--r);
+  padding:10px 18px;font-size:12px;font-family:var(--fm);color:var(--text);
+  opacity:0;transition:all .25s;pointer-events:none;white-space:nowrap;z-index:999}
+#toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
+#toast.err{border-color:var(--red);color:var(--red)}
+#toast.ok{border-color:var(--green);color:var(--green)}
+
+/* modal */
+#modal{display:none;position:fixed;inset:0;background:rgba(9,9,12,.85);
+  backdrop-filter:blur(14px);z-index:100;align-items:center;justify-content:center}
+#modal.on{display:flex}
+.modal-box{background:var(--bg2);border:1px solid var(--border2);border-radius:20px;
+  padding:36px;text-align:center;max-width:380px;width:90%}
+.modal-icon{font-size:50px;margin-bottom:16px}
+.modal-title{font-size:20px;font-weight:700;margin-bottom:8px}
+.modal-sub{font-size:12px;color:var(--text2);line-height:1.6;margin-bottom:24px}
+.modal-btns{display:flex;gap:10px;justify-content:center}
+.btn-outline{padding:9px 22px;background:var(--bg3);border:1px solid var(--border2);border-radius:var(--r);
+  color:var(--text);font-family:var(--fh);font-size:13px;font-weight:600;cursor:pointer;transition:all .15s}
+.btn-outline:hover{background:var(--bg4)}
+.btn-accent{padding:9px 22px;background:var(--accent);border:none;border-radius:var(--r);
+  color:#09090c;font-family:var(--fh);font-size:13px;font-weight:700;cursor:pointer;
+  text-decoration:none;display:inline-block}
+.btn-accent:hover{filter:brightness(1.1)}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header>
+    <div class="logo">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#09090c" stroke-width="2.5" stroke-linecap="round">
+        <path d="M6 3L20 12 6 21V3z"/>
+      </svg>
+    </div>
+    <h1>Video<span>Cutter</span></h1>
+    <div class="badge">
+      <div class="badge-dot"></div>
+      <span>FFmpeg local</span>
+    </div>
+  </header>
+
+  <div class="notice">
+    ⚡ Usa o FFmpeg instalado no seu Mac — rápido e sem limite de tamanho.
+    Vídeos <strong>nunca saem do seu computador</strong>.
+  </div>
+
+  <div id="dropzone" onclick="triggerPick()"
+       ondragover="onDragOver(event)" ondragleave="onDragLeave(event)" ondrop="onDrop(event)">
+    <span class="dz-icon">🎬</span>
+    <div class="dz-title">Clique ou arraste seus vídeos aqui</div>
+    <div class="dz-sub">MP4, MOV, AVI, MKV, WebM — <strong>processado localmente</strong></div>
+  </div>
+  <input type="file" id="file-input" accept="video/*" multiple style="display:none" onchange="onFilePick(event)"/>
+
+  <div id="clips"></div>
+</div>
+
+<div id="footer">
+  <div class="footer-inner">
+    <div class="prog-wrap" id="progwrap">
+      <div class="prog-bar"><div class="prog-fill" id="progfill"></div></div>
+      <div class="prog-lbl"><span id="progtxt">Preparando…</span><span id="progpct">0%</span></div>
+    </div>
+    <button id="btn-go" disabled onclick="generate()">▶ Gerar Vídeo Final</button>
+  </div>
+</div>
+
+<div id="modal">
+  <div class="modal-box">
+    <div class="modal-icon">✅</div>
+    <div class="modal-title">Vídeo pronto!</div>
+    <div class="modal-sub" id="modal-sub">Seu vídeo foi gerado com sucesso.</div>
+    <div class="modal-btns">
+      <button class="btn-outline" onclick="closeModal()">Fechar</button>
+      <a class="btn-accent" id="modal-dl" href="#">⬇ Baixar</a>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+const API = '';
+let clips = [];
+let toastTmr = null;
+
+// ── File picking ──────────────────────────────────────────────────────────────
+function triggerPick() { document.getElementById('file-input').click(); }
+
+function onFilePick(e) {
+  Array.from(e.target.files).forEach(addClip);
+  e.target.value = '';
+}
+
+function onDragOver(e) { e.preventDefault(); document.getElementById('dropzone').classList.add('over'); }
+function onDragLeave(e) { if (!e.relatedTarget) document.getElementById('dropzone').classList.remove('over'); }
+function onDrop(e) {
+  e.preventDefault();
+  document.getElementById('dropzone').classList.remove('over');
+  const files = Array.from(e.dataTransfer.files).filter(f =>
+    f.type.startsWith('video/') || /\.(mp4|mov|avi|mkv|webm|m4v|mpg)$/i.test(f.name));
+  if (!files.length) { toast('Nenhum vídeo reconhecido.', 'err'); return; }
+  files.forEach(addClip);
+}
+
+function addClip(file) {
+  // Obtém o path real do arquivo via webkitRelativePath ou name
+  // No Mac, file.path está disponível via Electron; no browser normal usamos o objeto File
+  const clip = {
+    id: Date.now() + Math.random(),
+    file,
+    name: file.name,
+    duration: 0,
+    start: 0,
+    end: 0,
+  };
+  clips.push(clip);
+
+  // Lê duração via elemento <video>
+  const url = URL.createObjectURL(file);
+  const v = document.createElement('video');
+  v.preload = 'metadata';
+  v.onloadedmetadata = () => {
+    clip.duration = v.duration || 0;
+    clip.end = v.duration || 0;
+    URL.revokeObjectURL(url);
+    render();
+    updateBtn();
+  };
+  v.onerror = () => { URL.revokeObjectURL(url); render(); updateBtn(); };
+  v.src = url;
+  render();
+  updateBtn();
+}
+
+// ── Render ────────────────────────────────────────────────────────────────────
+function render() {
+  const container = document.getElementById('clips');
+  container.innerHTML = '';
+  clips.forEach((clip, i) => {
+    const sh = secToHMS(clip.start), eh = secToHMS(clip.end);
+    const selDur = clip.end - clip.start;
+    const pct = clip.duration > 0 ? (selDur / clip.duration * 100) : 100;
+    const startPct = clip.duration > 0 ? (clip.start / clip.duration * 100) : 0;
+
+    const d = document.createElement('div');
+    d.className = 'clip-card';
+    d.dataset.idx = i;
+    d.innerHTML = `
+      <div>
+        <div class="clip-top">
+          <span class="clip-num">#${i+1}</span>
+          <span class="clip-name" title="${esc(clip.name)}">${esc(clip.name)}</span>
+          <span class="clip-dur">${fmtSec(clip.duration)}</span>
+        </div>
+        <div class="clip-times">
+          <div class="tf">
+            <label>Início</label>
+            <div class="ti-row">${tInputs('s', i, sh)}</div>
+          </div>
+          <div class="arrow">→</div>
+          <div class="tf">
+            <label>Fim</label>
+            <div class="ti-row">${tInputs('e', i, eh)}</div>
+          </div>
+        </div>
+        <div class="range-bar">
+          <div class="range-fill" style="margin-left:${startPct.toFixed(1)}%;width:${pct.toFixed(1)}%"></div>
+        </div>
+        <div class="clip-sel">Trecho selecionado: <b>${fmtSec(selDur)}</b></div>
+      </div>
+      <div class="clip-actions">
+        ${i > 0
+          ? `<button class="btn-sm" onclick="move(${i},-1)" title="Mover acima">↑</button>`
+          : '<div style="height:30px"></div>'}
+        ${i < clips.length-1
+          ? `<button class="btn-sm" onclick="move(${i},1)" title="Mover abaixo">↓</button>`
+          : '<div style="height:30px"></div>'}
+        <button class="btn-sm dup" onclick="duplicate(${i})" title="Duplicar (novo trecho do mesmo vídeo)">+</button>
+        <button class="btn-sm del" onclick="remove(${i})" title="Remover">✕</button>
+      </div>
+    `;
+    container.appendChild(d);
+  });
+
+  container.querySelectorAll('.ts').forEach(inp => {
+    inp.addEventListener('change', onTimeChange);
+    inp.addEventListener('keydown', onArrow);
+    inp.addEventListener('focus', e => e.target.select());
+  });
+}
+
+function tInputs(field, idx, hms) {
+  return `
+    <input class="ts" data-i="${idx}" data-f="${field}" data-p="h" value="${p2(hms.h)}" maxlength="2"/>
+    <span class="ts-sep">:</span>
+    <input class="ts" data-i="${idx}" data-f="${field}" data-p="m" value="${p2(hms.m)}" maxlength="2"/>
+    <span class="ts-sep">:</span>
+    <input class="ts" data-i="${idx}" data-f="${field}" data-p="s" value="${p2(hms.s)}" maxlength="2"/>
+    <span class="ts-sep" style="font-size:11px;opacity:.5">.</span>
+    <input class="ts ts-ms" data-i="${idx}" data-f="${field}" data-p="ms" value="${p3(hms.ms)}" maxlength="3"/>
+  `;
+}
+
+function onTimeChange(e) {
+  const idx = parseInt(e.target.dataset.i);
+  const field = e.target.dataset.f;
+  const c = clips[idx]; if (!c) return;
+  const card = e.target.closest('.clip-card');
+  const h  = parseInt(card.querySelector(`[data-f="${field}"][data-p="h"]`).value)||0;
+  const m  = parseInt(card.querySelector(`[data-f="${field}"][data-p="m"]`).value)||0;
+  const s  = parseInt(card.querySelector(`[data-f="${field}"][data-p="s"]`).value)||0;
+  const ms = parseInt(card.querySelector(`[data-f="${field}"][data-p="ms"]`).value)||0;
+  let val = Math.max(0, Math.min(h*3600 + m*60 + s + ms/1000, c.duration));
+  if (field === 's') {
+    c.start = val;
+    if (c.end <= c.start) c.end = Math.min(c.start + 0.1, c.duration);
+  } else {
+    c.end = val;
+    if (c.end <= c.start) c.start = Math.max(c.end - 0.1, 0);
+  }
+  render(); updateBtn();
+}
+
+function onArrow(e) {
+  if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+  e.preventDefault();
+  const v    = parseInt(e.target.value)||0;
+  const p    = e.target.dataset.p;
+  const dir  = e.key === 'ArrowUp' ? 1 : -1;
+  const step = p === 'ms' ? 100 : 1;
+  const max  = p === 'ms' ? 999 : (p === 's' || p === 'm' ? 59 : 99);
+  e.target.value = p === 'ms'
+    ? p3(Math.min(max, Math.max(0, v + dir * step)))
+    : p2(Math.min(max, Math.max(0, v + dir)));
+  e.target.dispatchEvent(new Event('change'));
+}
+
+function remove(i) { clips.splice(i, 1); render(); updateBtn(); }
+function duplicate(i) {
+  const src = clips[i];
+  const copy = { id: Date.now() + Math.random(), file: src.file, name: src.name, duration: src.duration, start: src.start, end: src.end };
+  clips.splice(i + 1, 0, copy);
+  render(); updateBtn();
+}
+function move(i, d) {
+  const j = i + d;
+  if (j < 0 || j >= clips.length) return;
+  [clips[i], clips[j]] = [clips[j], clips[i]];
+  render(); updateBtn();
+}
+
+function updateBtn() {
+  const ok = clips.length > 0 && clips.every(c => c.end > c.start && c.duration > 0);
+  document.getElementById('btn-go').disabled = !ok;
+}
+
+// ── Generate ──────────────────────────────────────────────────────────────────
+async function generate() {
+  document.getElementById('btn-go').disabled = true;
+  document.getElementById('progwrap').classList.add('on');
+  setProgress(5, 'Enviando para processamento…');
+
+  try {
+    // Upload individual de cada arquivo (stream, sem multipart)
+    const fileIds = [];
+    const seen = new Map(); // evita re-upload do mesmo File
+
+    for (let i = 0; i < clips.length; i++) {
+      const clip = clips[i];
+      if (seen.has(clip.file)) {
+        fileIds.push(seen.get(clip.file));
+        continue;
+      }
+      setProgress(5 + (i / clips.length) * 45, `Enviando arquivo ${i+1}/${clips.length}…`);
+      const resp = await fetch(`${API}/upload`, {
+        method: 'POST',
+        headers: { 'X-Filename': clip.file.name, 'Content-Type': 'application/octet-stream' },
+        body: clip.file,
+      });
+      if (!resp.ok) throw new Error(`Erro no upload: ${resp.status}`);
+      const { file_id } = await resp.json();
+      seen.set(clip.file, file_id);
+      fileIds.push(file_id);
+    }
+
+    // Inicia processamento
+    setProgress(52, 'Processando com FFmpeg…');
+    const clipsPayload = clips.map((c, i) => ({
+      file_id: fileIds[i],
+      start: c.start,
+      end: c.end,
+      width: c.width || 0,
+      height: c.height || 0,
+    }));
+    const procResp = await fetch(`${API}/process`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clips: clipsPayload }),
+    });
+    if (!procResp.ok) throw new Error(`Erro no processamento: ${procResp.status}`);
+    const { job_id } = await procResp.json();
+
+    await pollJob(job_id);
+
+  } catch(e) {
+    toast('Erro: ' + e.message, 'err');
+    document.getElementById('btn-go').disabled = false;
+    document.getElementById('progwrap').classList.remove('on');
+  }
+}
+
+async function pollJob(job_id) {
+  for (;;) {
+    await new Promise(r => setTimeout(r, 800));
+    const resp = await fetch(`${API}/status/${job_id}`);
+    const job = await resp.json();
+
+    setProgress(job.progress, job.message);
+
+    if (job.status === 'done') {
+      setProgress(100, 'Concluído!');
+      const dl = `${API}/download/${job_id}`;
+      document.getElementById('modal-sub').textContent = job.message || 'Vídeo pronto!';
+      document.getElementById('modal-dl').href = dl;
+      document.getElementById('modal').classList.add('on');
+      document.getElementById('btn-go').disabled = false;
+      document.getElementById('progwrap').classList.remove('on');
+      return;
+    }
+
+    if (job.status === 'error') {
+      toast('Erro FFmpeg: ' + job.message, 'err');
+      document.getElementById('btn-go').disabled = false;
+      document.getElementById('progwrap').classList.remove('on');
+      return;
+    }
+  }
+}
+
+function setProgress(pct, label) {
+  document.getElementById('progfill').style.width = Math.round(pct) + '%';
+  document.getElementById('progtxt').textContent = label || '';
+  document.getElementById('progpct').textContent = Math.round(pct) + '%';
+}
+
+function closeModal() { document.getElementById('modal').classList.remove('on'); }
+
+// ── Utils ─────────────────────────────────────────────────────────────────────
+function secToHMS(s) {
+  const h  = Math.floor(s / 3600);
+  const m  = Math.floor((s % 3600) / 60);
+  const sec = Math.floor(s % 60);
+  const ms = Math.round((s - Math.floor(s)) * 1000);
+  return { h, m, s: sec, ms };
+}
+function fmtSec(s) {
+  if (!s||isNaN(s)) return '0:00';
+  const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sec=Math.floor(s%60);
+  return h>0?`${h}:${p2(m)}:${p2(sec)}`:`${m}:${p2(sec)}`;
+}
+function p2(n){ return String(Math.floor(n)).padStart(2,'0'); }
+function p3(n){ return String(Math.floor(n)).padStart(3,'0'); }
+function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function toast(msg, type='') {
+  const el = document.getElementById('toast');
+  el.textContent = msg; el.className = 'on '+(type||'');
+  clearTimeout(toastTmr);
+  toastTmr = setTimeout(()=>{ el.className=''; }, 4000);
+}
+</script>
+</body>
+</html>
