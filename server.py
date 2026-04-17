@@ -390,6 +390,8 @@ def run_job(job_id, clips, mode="join"):
 
         print(f"[job {job_id[:8]}] mode={mode} target={tw}x{th} clips={total}", flush=True)
 
+        srt_stats = []  # per-clip debug info
+
         for i, clip in enumerate(clips):
             src      = clip["path"]
             start    = float(clip["start"])
@@ -409,30 +411,47 @@ def run_job(job_id, clips, mode="join"):
                 "setsar=1",
             ]
 
+            clip_debug = {"i": i, "srt_len": len(srt) if srt else 0}
+
             # SRT → ASS legendas Reels (inferior)
             if srt:
                 try:
                     entries = parse_srt(srt)
+                    clip_debug["parsed"] = len(entries)
                     entries = filter_shift_srt(entries, start, end)
+                    clip_debug["after_filter"] = len(entries)
                     if entries:
                         ass_path = os.path.join(tmpdir, f"seg_{i:03d}_sub.ass")
                         write_ass_reels(entries, ass_path, tw, th)
-                        vf_parts.append(f"ass={escape_for_filter(ass_path)}")
-                        print(f"[job {job_id[:8]}] seg {i}: {len(entries)} SRT entries", flush=True)
+                        # IMPORTANT: use forward-slash path, single-quoted, for ass filter
+                        vf_parts.append(f"ass='{ass_path}'")
+                        clip_debug["sub_applied"] = True
+                        clip_debug["ass_path"] = ass_path
+                        print(f"[job {job_id[:8]}] seg {i}: SRT applied ({len(entries)} entries)", flush=True)
+                    else:
+                        clip_debug["sub_applied"] = False
+                        clip_debug["reason"] = "no entries after filter/parse"
                 except Exception as srt_err:
+                    clip_debug["sub_error"] = str(srt_err)
                     print(f"[job {job_id[:8]}] SRT error seg {i}: {srt_err}", flush=True)
+                    tb = traceback.format_exc()
+                    print(tb, flush=True)
 
             # Headline → ASS (topo) durante todo o trecho
             if headline:
                 try:
                     ass_hl = os.path.join(tmpdir, f"seg_{i:03d}_hl.ass")
                     write_ass_headline(headline, end - start, ass_hl, tw, th)
-                    vf_parts.append(f"ass={escape_for_filter(ass_hl)}")
+                    vf_parts.append(f"ass='{ass_hl}'")
+                    clip_debug["headline_applied"] = True
                     print(f"[job {job_id[:8]}] seg {i}: headline applied", flush=True)
                 except Exception as hl_err:
+                    clip_debug["headline_error"] = str(hl_err)
                     print(f"[job {job_id[:8]}] headline error seg {i}: {hl_err}", flush=True)
 
+            srt_stats.append(clip_debug)
             vf = ",".join(vf_parts)
+            print(f"[job {job_id[:8]}] seg {i} vf={vf}", flush=True)
 
             cmd = [
                 FFMPEG, "-y",
@@ -463,7 +482,7 @@ def run_job(job_id, clips, mode="join"):
             size_mb = os.path.getsize(zip_path) / 1024 / 1024
             job.update(status="done", progress=100,
                        message=f"{total} corte{'s' if total>1 else ''} • {size_mb:.1f} MB",
-                       output=zip_path, output_type="zip")
+                       output=zip_path, output_type="zip", srt_debug=srt_stats)
         else:
             job["message"] = "Unindo trechos…"
             if total == 1:
@@ -485,7 +504,7 @@ def run_job(job_id, clips, mode="join"):
             size_mb = os.path.getsize(final) / 1024 / 1024
             job.update(status="done", progress=100,
                        message=f"{total} trecho{'s' if total>1 else ''} • {size_mb:.1f} MB",
-                       output=final, output_type="mp4")
+                       output=final, output_type="mp4", srt_debug=srt_stats)
 
         print(f"[job {job_id[:8]}] done", flush=True)
 
