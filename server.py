@@ -118,6 +118,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
             FILES[file_id] = tmp_path
             self.send_json(200, {"file_id": file_id})
 
+        elif path == "/import-url":
+            length = int(self.headers.get("Content-Length", 0))
+            try:
+                data = json.loads(self.rfile.read(length))
+            except Exception:
+                self.send_json(400, {"error": "JSON inválido"})
+                return
+            url = (data.get("url") or "").strip()
+            if not url or not (url.startswith("http://") or url.startswith("https://")):
+                self.send_json(400, {"error": "URL inválida"})
+                return
+            job_id = str(uuid.uuid4())
+            JOBS[job_id] = {"status": "queued", "progress": 0,
+                            "message": "Preparando download…", "kind": "import"}
+            threading.Thread(target=run_import_url, args=(job_id, url), daemon=True).start()
+            self.send_json(200, {"job_id": job_id})
+
         elif path == "/transcribe":
             length = int(self.headers.get("Content-Length", 0))
             try:
@@ -289,10 +306,10 @@ def write_ass_reels(entries, path, video_w, video_h, words_per_group=2):
 
 def write_ass_headline(text, duration, path, video_w, video_h):
     """Headline no topo do vídeo durante o trecho inteiro."""
-    fs      = max(44, int(video_h * 0.085))
+    fs      = max(28, int(video_h * 0.048))
     mv_top  = int(video_h * 0.06)
-    outline = max(4, int(fs * 0.13))
-    shadow  = max(2, int(fs * 0.06))
+    outline = max(3, int(fs * 0.11))
+    shadow  = max(1, int(fs * 0.04))
     # Cor accent #E8FF47 em ASS BGR = &H0047FFE8
     header = (
         f"[Script Info]\n"
@@ -315,6 +332,85 @@ def write_ass_headline(text, duration, path, video_w, video_h):
 
 def escape_for_filter(path):
     return path.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\\\'")
+
+
+# ── URL import job (yt-dlp) ─────────────────────────────────────────────────
+def run_import_url(job_id, url):
+    job = JOBS[job_id]
+    try:
+        job.update(status="running", progress=5, message="Obtendo informações…")
+
+        # Obter título do vídeo (rápido)
+        title = "video"
+        try:
+            t = subprocess.run(
+                ["yt-dlp", "--get-title", "--no-playlist", "--no-warnings", url],
+                capture_output=True, timeout=30,
+            )
+            if t.returncode == 0:
+                title = (t.stdout.decode("utf-8", errors="replace").strip() or "video")[:120]
+        except Exception:
+            pass
+
+        job.update(progress=15, message=f"Baixando “{title}”…")
+        file_id  = str(uuid.uuid4())
+        out_path = os.path.join(tempfile.gettempdir(), f"vc_{file_id}.mp4")
+
+        # Baixa com yt-dlp — prefere MP4 direto, senão mescla melhores streams
+        dl_cmd = [
+            "yt-dlp",
+            "-f", "best[ext=mp4]/bv*[ext=mp4]+ba[ext=m4a]/b",
+            "--merge-output-format", "mp4",
+            "--no-playlist",
+            "--no-warnings",
+            "-o", out_path,
+            url,
+        ]
+        r = subprocess.run(dl_cmd, capture_output=True, timeout=600)
+        if r.returncode != 0:
+            err = r.stderr.decode("utf-8", errors="replace")[-800:]
+            raise RuntimeError(err or "falha ao baixar")
+
+        if not os.path.exists(out_path):
+            raise RuntimeError("arquivo baixado não encontrado")
+
+        job.update(progress=85, message="Analisando vídeo…")
+        width, height, duration = 1280, 720, 0.0
+        try:
+            probe = subprocess.run([
+                "ffprobe", "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=width,height:format=duration",
+                "-of", "json", out_path,
+            ], capture_output=True, timeout=30)
+            pdata = json.loads(probe.stdout.decode("utf-8", errors="replace"))
+            st = (pdata.get("streams") or [{}])[0]
+            width  = int(st.get("width")  or 1280)
+            height = int(st.get("height") or 720)
+            duration = float((pdata.get("format") or {}).get("duration") or 0.0)
+        except Exception as pe:
+            print(f"[import {job_id[:8]}] probe error: {pe}", flush=True)
+
+        FILES[file_id] = out_path
+        size_mb = os.path.getsize(out_path) / 1024 / 1024
+
+        job.update(
+            status="done", progress=100,
+            message=f"{title} • {size_mb:.1f} MB",
+            file_id=file_id, name=title,
+            width=width, height=height, duration=duration,
+        )
+        print(f"[import {job_id[:8]}] done: {title} {width}x{height} {duration:.1f}s", flush=True)
+
+    except subprocess.TimeoutExpired:
+        job.update(status="error", message="timeout: o vídeo é muito longo ou a conexão está lenta")
+    except Exception as e:
+        tb = traceback.format_exc()
+        print(f"[import {job_id[:8]}] EXCEPTION:\n{tb}", flush=True)
+        RECENT_ERRORS.append({"job": job_id, "error": str(e), "kind": "import"})
+        if len(RECENT_ERRORS) > 20:
+            RECENT_ERRORS.pop(0)
+        job.update(status="error", message=str(e)[-500:])
 
 
 # ── Transcribe job ──────────────────────────────────────────────────────────

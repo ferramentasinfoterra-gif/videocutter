@@ -41,8 +41,27 @@ h1 span{color:var(--text3)}
 
 /* dropzone */
 #dropzone{border:1.5px dashed var(--border2);border-radius:var(--r2);padding:36px 20px;
-  text-align:center;cursor:pointer;background:var(--bg2);transition:all .2s;margin-bottom:20px;
+  text-align:center;cursor:pointer;background:var(--bg2);transition:all .2s;margin-bottom:12px;
   position:relative;overflow:hidden}
+
+/* URL import */
+.url-import{display:flex;gap:8px;margin-bottom:20px;align-items:center;background:var(--bg2);
+  border:1px solid var(--border);border-radius:var(--r2);padding:10px 12px;transition:border-color .2s}
+.url-import:focus-within{border-color:var(--accent)}
+.url-icon{font-size:16px;margin-left:4px}
+.url-input{flex:1;background:transparent;border:none;color:var(--text);
+  font-family:var(--fm);font-size:12px;padding:8px 6px;outline:none}
+.url-input::placeholder{color:var(--text3)}
+.url-btn{font-family:var(--fh);font-size:12px;font-weight:700;padding:8px 16px;
+  background:var(--accent);border:none;border-radius:8px;color:#09090c;cursor:pointer;
+  transition:all .15s;white-space:nowrap}
+.url-btn:hover:not(:disabled){filter:brightness(1.1)}
+.url-btn:disabled{opacity:.4;cursor:not-allowed}
+.url-status{padding:8px 12px;margin-bottom:12px;background:rgba(74,222,128,.06);
+  border:1px solid rgba(74,222,128,.2);border-radius:var(--r);
+  font-family:var(--fm);font-size:11px;color:var(--green);display:none;align-items:center;gap:8px}
+.url-status.on{display:flex}
+.url-status .spin{animation:spin 1s linear infinite;display:inline-block}
 #dropzone::after{content:'';position:absolute;inset:0;
   background:radial-gradient(ellipse at 50% 0%,rgba(232,255,71,.06) 0%,transparent 65%);pointer-events:none}
 #dropzone:hover,#dropzone.over{border-color:var(--accent);background:var(--accent-dim)}
@@ -230,7 +249,7 @@ h1 span{color:var(--text3)}
   </header>
 
   <div class="notice">
-    ⚡ Cortes em massa · Unir ou arquivos separados · Legenda Reels (SRT manual ou Whisper automático) · Headline no topo
+    ⚡ Upload local ou via URL (YouTube/TikTok/Insta) · Cortes em massa · Unir ou ZIP · Legenda Reels (SRT ou Whisper) · Headline
   </div>
 
   <div id="dropzone" onclick="triggerPick()"
@@ -240,6 +259,18 @@ h1 span{color:var(--text3)}
     <div class="dz-sub">MP4, MOV, AVI, MKV, WebM — <strong>múltiplos vídeos e múltiplos trechos</strong></div>
   </div>
   <input type="file" id="file-input" accept="video/*" multiple style="display:none" onchange="onFilePick(event)"/>
+
+  <div class="url-import">
+    <span class="url-icon">🔗</span>
+    <input id="url-input" class="url-input" type="url"
+           placeholder="Cole um link (YouTube, TikTok, Instagram, Twitter, Vimeo…)"
+           onkeydown="if(event.key==='Enter') importFromUrl()"/>
+    <button id="url-btn" class="url-btn" onclick="importFromUrl()">Baixar</button>
+  </div>
+  <div id="url-status" class="url-status">
+    <span class="spin">⏳</span>
+    <span id="url-status-text">Baixando…</span>
+  </div>
 
   <div id="groups"></div>
 </div>
@@ -294,6 +325,73 @@ function onDrop(e) {
     f.type.startsWith('video/') || /\.(mp4|mov|avi|mkv|webm|m4v|mpg)$/i.test(f.name));
   if (!files.length) { toast('Nenhum vídeo reconhecido.', 'err'); return; }
   files.forEach(addGroup);
+}
+
+async function importFromUrl() {
+  const input  = document.getElementById('url-input');
+  const button = document.getElementById('url-btn');
+  const status = document.getElementById('url-status');
+  const statusText = document.getElementById('url-status-text');
+  const url = input.value.trim();
+  if (!url) { toast('Cole um link primeiro', 'err'); return; }
+
+  input.disabled = true;
+  button.disabled = true;
+  status.classList.add('on');
+  statusText.textContent = 'Iniciando download…';
+
+  try {
+    const resp = await fetch(`${API}/import-url`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(()=>({error:`HTTP ${resp.status}`}));
+      throw new Error(err.error || `HTTP ${resp.status}`);
+    }
+    const { job_id } = await resp.json();
+
+    // Poll até terminar
+    for (;;) {
+      await new Promise(r => setTimeout(r, 1200));
+      const sr = await fetch(`${API}/status/${job_id}`);
+      const job = await sr.json();
+      statusText.textContent = `${job.message || 'Baixando…'} (${job.progress||0}%)`;
+      if (job.status === 'done') {
+        addUrlGroup({
+          fileId:   job.file_id,
+          name:     job.name || 'video',
+          duration: job.duration || 0,
+          width:    job.width || 0,
+          height:   job.height || 0,
+        });
+        input.value = '';
+        toast(`"${job.name}" importado!`, 'ok');
+        return;
+      }
+      if (job.status === 'error') {
+        throw new Error(job.message || 'erro desconhecido');
+      }
+    }
+  } catch (e) {
+    toast('Erro: ' + e.message, 'err');
+  } finally {
+    input.disabled = false;
+    button.disabled = false;
+    status.classList.remove('on');
+  }
+}
+
+function addUrlGroup({fileId, name, duration, width, height}) {
+  const g = {
+    id: uid(), file: null, fileId: fileId,
+    name, duration, width, height,
+    cuts: [{ id: uid(), start: 0, end: duration || 0 }],
+    srt: null, transcribing: false, headline: '',
+  };
+  groups.push(g);
+  render(); updateBtn();
 }
 
 function addGroup(file) {
@@ -386,8 +484,9 @@ async function autoTranscribe(gid) {
   try {
     g.transcribing = true; render();
 
-    // Upload the file first if not uploaded
+    // Upload the file first if not uploaded (URL-imported videos already have fileId)
     if (!g.fileId) {
+      if (!g.file) throw new Error('arquivo não disponível');
       const resp = await fetch(`${API}/upload`, {
         method: 'POST',
         headers: { 'X-Filename': g.file.name, 'Content-Type': 'application/octet-stream' },
@@ -684,11 +783,13 @@ async function generate() {
   setProgress(3, 'Enviando arquivos…');
 
   try {
-    // Upload each unique File object once
+    // Upload each unique File object once (skip if already uploaded via URL import)
     const seen = new Map();
     for (let i = 0; i < groups.length; i++) {
       const g = groups[i];
-      if (seen.has(g.file)) { g.fileId = seen.get(g.file); continue; }
+      if (g.fileId && !g.file) continue;  // URL-imported, já está no servidor
+      if (g.file && seen.has(g.file)) { g.fileId = seen.get(g.file); continue; }
+      if (!g.file) continue;
       setProgress(3 + (i / groups.length) * 44, `Enviando ${g.name}…`);
       const resp = await fetch(`${API}/upload`, {
         method: 'POST',
