@@ -261,11 +261,11 @@ def ass_escape(text):
 
 
 def write_ass_reels(entries, path, video_w, video_h, words_per_group=2):
-    """Estilo Reels: grupos de N palavras, grande, maiúscula, na parte inferior."""
-    fs      = max(36, int(video_h * 0.065))
-    mv      = int(video_h * 0.22)
-    outline = max(3, int(fs * 0.12))
-    shadow  = max(1, int(fs * 0.05))
+    """Estilo Reels: grupos de N palavras, maiúscula, na parte inferior."""
+    fs      = max(24, int(video_h * 0.04))
+    mv      = int(video_h * 0.18)
+    outline = max(2, int(fs * 0.11))
+    shadow  = max(1, int(fs * 0.04))
 
     header = (
         f"[Script Info]\n"
