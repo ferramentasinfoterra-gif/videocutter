@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import http.server, json, os, shutil, subprocess, tempfile, threading, traceback, uuid, zipfile
+import http.server, json, os, re, shutil, subprocess, tempfile, threading, traceback, uuid, zipfile
 from urllib.parse import urlparse
 
 PORT   = int(os.environ.get("PORT", 8765))
@@ -9,6 +9,22 @@ HTML_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "videocutte
 JOBS  = {}
 FILES = {}
 RECENT_ERRORS = []
+
+# Lazy-load Whisper (tiny model)
+WHISPER_MODEL = None
+WHISPER_LOCK  = threading.Lock()
+
+
+def get_whisper():
+    global WHISPER_MODEL
+    if WHISPER_MODEL is None:
+        with WHISPER_LOCK:
+            if WHISPER_MODEL is None:
+                print("[whisper] loading tiny model…", flush=True)
+                from faster_whisper import WhisperModel
+                WHISPER_MODEL = WhisperModel("tiny", device="cpu", compute_type="int8")
+                print("[whisper] ready", flush=True)
+    return WHISPER_MODEL
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -73,7 +89,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == "/debug":
             self.send_json(200, {
                 "errors": RECENT_ERRORS,
-                "jobs": {k: {kk: vv for kk, vv in v.items() if kk != "output"} for k, v in list(JOBS.items())[-10:]}
+                "jobs": {k: {kk: vv for kk, vv in v.items() if kk not in ("output", "srt")}
+                         for k, v in list(JOBS.items())[-10:]}
             })
 
         else:
@@ -101,6 +118,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
             FILES[file_id] = tmp_path
             self.send_json(200, {"file_id": file_id})
 
+        elif path == "/transcribe":
+            length = int(self.headers.get("Content-Length", 0))
+            try:
+                data = json.loads(self.rfile.read(length))
+            except Exception:
+                self.send_json(400, {"error": "JSON inválido"})
+                return
+            file_id  = data.get("file_id")
+            language = data.get("language") or "pt"
+            fpath    = FILES.get(file_id)
+            if not fpath or not os.path.exists(fpath):
+                self.send_json(400, {"error": "arquivo não encontrado"})
+                return
+            job_id = str(uuid.uuid4())
+            JOBS[job_id] = {"status": "queued", "progress": 0,
+                            "message": "Preparando transcrição…", "kind": "transcribe"}
+            threading.Thread(target=run_transcribe, args=(job_id, fpath, language), daemon=True).start()
+            self.send_json(200, {"job_id": job_id})
+
         elif path == "/process":
             length = int(self.headers.get("Content-Length", 0))
             try:
@@ -110,7 +146,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
 
             clips = data.get("clips", [])
-            mode  = data.get("mode", "join")  # "join" | "separate"
+            mode  = data.get("mode", "join")
             if not clips:
                 self.send_json(400, {"error": "nenhum clipe"})
                 return
@@ -122,14 +158,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self.send_json(400, {"error": f"arquivo não encontrado: {c.get('file_id')}"})
                     return
                 clips_data.append({
-                    "path": fpath, "start": c["start"], "end": c["end"],
+                    "path": fpath,
+                    "start": c["start"], "end": c["end"],
                     "width": c.get("width", 0), "height": c.get("height", 0),
+                    "srt": c.get("srt") or None,
+                    "headline": (c.get("headline") or "").strip() or None,
                 })
 
             job_id = str(uuid.uuid4())
             JOBS[job_id] = {
                 "status": "queued", "progress": 0, "message": "Aguardando…",
                 "output": None, "output_type": "zip" if mode == "separate" else "mp4",
+                "kind": "process",
             }
             threading.Thread(target=run_job, args=(job_id, clips_data, mode), daemon=True).start()
             self.send_json(200, {"job_id": job_id})
@@ -138,6 +178,204 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json(404, {"error": "rota não encontrada"})
 
 
+# ── SRT parsing ─────────────────────────────────────────────────────────────
+_SRT_TIME_RE = re.compile(
+    r"(\d+):(\d+):(\d+)[,.](\d+)\s*-->\s*(\d+):(\d+):(\d+)[,.](\d+)"
+)
+
+def parse_srt(text):
+    entries = []
+    text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    blocks = re.split(r"\n\s*\n", text)
+    for block in blocks:
+        lines = [l for l in block.split("\n") if l.strip()]
+        if len(lines) < 2:
+            continue
+        ts_idx = 0
+        if "-->" not in lines[0] and "-->" in lines[1]:
+            ts_idx = 1
+        if ts_idx >= len(lines) or "-->" not in lines[ts_idx]:
+            continue
+        m = _SRT_TIME_RE.search(lines[ts_idx])
+        if not m:
+            continue
+        s = int(m[1])*3600 + int(m[2])*60 + int(m[3]) + int(m[4])/1000.0
+        e = int(m[5])*3600 + int(m[6])*60 + int(m[7]) + int(m[8])/1000.0
+        txt = " ".join(lines[ts_idx+1:]).strip()
+        if txt and e > s:
+            entries.append((s, e, txt))
+    return entries
+
+
+def filter_shift_srt(entries, cut_start, cut_end):
+    out = []
+    for s, e, t in entries:
+        if e <= cut_start or s >= cut_end:
+            continue
+        ns = max(0.0, s - cut_start)
+        ne = min(cut_end - cut_start, e - cut_start)
+        if ne > ns + 0.05:
+            out.append((ns, ne, t))
+    return out
+
+
+def fmt_ass_time(secs):
+    h  = int(secs // 3600)
+    m  = int((secs % 3600) // 60)
+    s  = int(secs % 60)
+    cs = int(round((secs - int(secs)) * 100))
+    if cs >= 100: cs = 99
+    return f"{h:d}:{m:02d}:{s:02d}.{cs:02d}"
+
+
+def fmt_srt_time(secs):
+    h = int(secs // 3600)
+    m = int((secs % 3600) // 60)
+    s = int(secs % 60)
+    ms = int(round((secs - int(secs)) * 1000))
+    if ms >= 1000:
+        s += 1
+        ms = 0
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def ass_escape(text):
+    return text.replace("\\", "\\\\").replace("{", "(").replace("}", ")")
+
+
+def write_ass_reels(entries, path, video_w, video_h, words_per_group=2):
+    """Estilo Reels: grupos de N palavras, grande, maiúscula, na parte inferior."""
+    fs      = max(36, int(video_h * 0.065))
+    mv      = int(video_h * 0.22)
+    outline = max(3, int(fs * 0.12))
+    shadow  = max(1, int(fs * 0.05))
+
+    header = (
+        f"[Script Info]\n"
+        f"Title: Reels\n"
+        f"ScriptType: v4.00+\n"
+        f"PlayResX: {video_w}\n"
+        f"PlayResY: {video_h}\n"
+        f"WrapStyle: 2\n"
+        f"ScaledBorderAndShadow: yes\n\n"
+        f"[V4+ Styles]\n"
+        f"Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        f"Style: Reels,DejaVu Sans,{fs},&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,{outline},{shadow},2,60,60,{mv},1\n\n"
+        f"[Events]\n"
+        f"Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+    )
+
+    events = []
+    for s, e, text in entries:
+        words = text.split()
+        if not words:
+            continue
+        duration = e - s
+        groups = [words[i:i+words_per_group] for i in range(0, len(words), words_per_group)]
+        if not groups:
+            continue
+        per = duration / len(groups)
+        for i, grp in enumerate(groups):
+            gs = s + i * per
+            ge = s + (i + 1) * per if i < len(groups) - 1 else e
+            line = ass_escape(" ".join(grp).upper())
+            events.append(
+                f"Dialogue: 0,{fmt_ass_time(gs)},{fmt_ass_time(ge)},Reels,,0,0,0,,{line}"
+            )
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(header + "\n".join(events) + "\n")
+
+
+def write_ass_headline(text, duration, path, video_w, video_h):
+    """Headline no topo do vídeo durante o trecho inteiro."""
+    fs      = max(44, int(video_h * 0.085))
+    mv_top  = int(video_h * 0.06)
+    outline = max(4, int(fs * 0.13))
+    shadow  = max(2, int(fs * 0.06))
+    # Cor accent #E8FF47 em ASS BGR = &H0047FFE8
+    header = (
+        f"[Script Info]\n"
+        f"Title: Headline\n"
+        f"ScriptType: v4.00+\n"
+        f"PlayResX: {video_w}\n"
+        f"PlayResY: {video_h}\n"
+        f"WrapStyle: 2\n"
+        f"ScaledBorderAndShadow: yes\n\n"
+        f"[V4+ Styles]\n"
+        f"Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        f"Style: Headline,DejaVu Sans,{fs},&H0047FFE8,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,{outline},{shadow},8,60,60,{mv_top},1\n\n"
+        f"[Events]\n"
+        f"Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+        f"Dialogue: 0,0:00:00.00,{fmt_ass_time(duration)},Headline,,0,0,0,,{ass_escape(text.upper())}\n"
+    )
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(header)
+
+
+def escape_for_filter(path):
+    return path.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\\\'")
+
+
+# ── Transcribe job ──────────────────────────────────────────────────────────
+def run_transcribe(job_id, video_path, language="pt"):
+    job = JOBS[job_id]
+    tmpdir = tempfile.mkdtemp(prefix="vctrans_")
+    try:
+        job.update(status="running", progress=10, message="Extraindo áudio…")
+        audio_path = os.path.join(tmpdir, "audio.mp3")
+        r = subprocess.run([
+            FFMPEG, "-y", "-i", video_path,
+            "-vn", "-acodec", "mp3", "-ab", "64k",
+            "-ar", "16000", "-ac", "1",
+            audio_path,
+        ], capture_output=True)
+        if r.returncode != 0:
+            raise RuntimeError(r.stderr.decode("utf-8", errors="replace")[-800:])
+
+        job.update(progress=25, message="Carregando Whisper…")
+        model = get_whisper()
+
+        job.update(progress=35, message="Transcrevendo (pode levar alguns minutos)…")
+        segments, info = model.transcribe(
+            audio_path, language=language, beam_size=1, vad_filter=True,
+            vad_parameters={"min_silence_duration_ms": 500},
+        )
+
+        lines = []
+        idx = 0
+        for seg in segments:
+            idx += 1
+            text = seg.text.strip()
+            if not text:
+                idx -= 1
+                continue
+            lines.append(f"{idx}")
+            lines.append(f"{fmt_srt_time(seg.start)} --> {fmt_srt_time(seg.end)}")
+            lines.append(text)
+            lines.append("")
+            # approx progress update
+            if info.duration and seg.end:
+                pct = 35 + int((seg.end / info.duration) * 60)
+                job["progress"] = min(95, pct)
+
+        srt = "\n".join(lines).strip() + "\n"
+        job.update(status="done", progress=100, message=f"{idx} legendas geradas", srt=srt)
+        print(f"[whisper {job_id[:8]}] done, {idx} segments", flush=True)
+
+    except Exception as e:
+        tb = traceback.format_exc()
+        print(f"[whisper {job_id[:8]}] EXCEPTION:\n{tb}", flush=True)
+        RECENT_ERRORS.append({"job": job_id, "error": str(e), "kind": "transcribe"})
+        if len(RECENT_ERRORS) > 20:
+            RECENT_ERRORS.pop(0)
+        job.update(status="error", message=str(e)[-500:])
+    finally:
+        try: shutil.rmtree(tmpdir, ignore_errors=True)
+        except: pass
+
+
+# ── Video processing job ────────────────────────────────────────────────────
 def run_job(job_id, clips, mode="join"):
     job    = JOBS[job_id]
     tmpdir = tempfile.mkdtemp(prefix="vcjob_")
@@ -153,21 +391,49 @@ def run_job(job_id, clips, mode="join"):
         print(f"[job {job_id[:8]}] mode={mode} target={tw}x{th} clips={total}", flush=True)
 
         for i, clip in enumerate(clips):
-            src   = clip["path"]
-            start = float(clip["start"])
-            end   = float(clip["end"])
-            out   = os.path.join(tmpdir, f"seg_{i:03d}.mp4")
+            src      = clip["path"]
+            start    = float(clip["start"])
+            end      = float(clip["end"])
+            srt      = clip.get("srt")
+            headline = clip.get("headline")
+            out      = os.path.join(tmpdir, f"seg_{i:03d}.mp4")
             segs.append(out)
 
             job["status"]   = "running"
             job["progress"] = 5 + int(i / total * 80)
             job["message"]  = f"Cortando trecho {i+1}/{total}…"
 
-            vf = (
-                f"scale={tw}:{th}:force_original_aspect_ratio=decrease,"
-                f"pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2:color=black,"
-                f"setsar=1"
-            )
+            vf_parts = [
+                f"scale={tw}:{th}:force_original_aspect_ratio=decrease",
+                f"pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2:color=black",
+                "setsar=1",
+            ]
+
+            # SRT → ASS legendas Reels (inferior)
+            if srt:
+                try:
+                    entries = parse_srt(srt)
+                    entries = filter_shift_srt(entries, start, end)
+                    if entries:
+                        ass_path = os.path.join(tmpdir, f"seg_{i:03d}_sub.ass")
+                        write_ass_reels(entries, ass_path, tw, th)
+                        vf_parts.append(f"ass={escape_for_filter(ass_path)}")
+                        print(f"[job {job_id[:8]}] seg {i}: {len(entries)} SRT entries", flush=True)
+                except Exception as srt_err:
+                    print(f"[job {job_id[:8]}] SRT error seg {i}: {srt_err}", flush=True)
+
+            # Headline → ASS (topo) durante todo o trecho
+            if headline:
+                try:
+                    ass_hl = os.path.join(tmpdir, f"seg_{i:03d}_hl.ass")
+                    write_ass_headline(headline, end - start, ass_hl, tw, th)
+                    vf_parts.append(f"ass={escape_for_filter(ass_hl)}")
+                    print(f"[job {job_id[:8]}] seg {i}: headline applied", flush=True)
+                except Exception as hl_err:
+                    print(f"[job {job_id[:8]}] headline error seg {i}: {hl_err}", flush=True)
+
+            vf = ",".join(vf_parts)
+
             cmd = [
                 FFMPEG, "-y",
                 "-ss", str(start), "-to", str(end),
@@ -198,7 +464,6 @@ def run_job(job_id, clips, mode="join"):
             job.update(status="done", progress=100,
                        message=f"{total} corte{'s' if total>1 else ''} • {size_mb:.1f} MB",
                        output=zip_path, output_type="zip")
-
         else:
             job["message"] = "Unindo trechos…"
             if total == 1:

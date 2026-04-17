@@ -117,6 +117,43 @@ h1 span{color:var(--text3)}
   resize:vertical;min-height:86px;outline:none;line-height:1.7;transition:border-color .15s}
 .paste-area textarea:focus{border-color:var(--accent)}
 .paste-btns{display:flex;gap:8px;margin-top:8px;justify-content:flex-end}
+
+/* SRT area */
+.srt-area{padding:0 12px 12px;border-top:1px solid var(--border);padding-top:10px;margin-top:4px}
+.srt-header{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.srt-icon{font-size:14px}
+.srt-title{font-size:11px;color:var(--text2);font-family:var(--fm);flex:1}
+.srt-badge{font-family:var(--fm);font-size:10px;padding:2px 8px;border-radius:99px;
+  background:var(--accent-dim);color:var(--accent);letter-spacing:.03em}
+.srt-badge.auto{background:rgba(74,222,128,.12);color:var(--green)}
+.srt-edit{width:100%;background:var(--bg4);border:1px solid var(--border2);border-radius:var(--r);
+  color:var(--text);font-family:var(--fm);font-size:11px;padding:10px 12px;
+  resize:vertical;min-height:120px;max-height:260px;outline:none;line-height:1.5;transition:border-color .15s}
+.srt-edit:focus{border-color:var(--accent)}
+.srt-actions{display:flex;gap:8px;margin-top:8px;align-items:center;flex-wrap:wrap}
+.srt-hint{font-size:10px;color:var(--text3);margin-left:auto;font-family:var(--fm)}
+
+/* Whisper progress */
+.srt-transcribing{padding:12px;background:rgba(74,222,128,.06);border:1px solid rgba(74,222,128,.2);
+  border-radius:var(--r);margin-top:8px;font-family:var(--fm);font-size:11px;color:var(--green)}
+.srt-transcribing .spin{display:inline-block;margin-right:6px;animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* Headline area */
+.hl-area{padding:0 12px 12px;border-top:1px solid var(--border);padding-top:10px;margin-top:4px}
+.hl-header{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.hl-title{font-size:11px;color:var(--text2);font-family:var(--fm);flex:1}
+.hl-badge{font-family:var(--fm);font-size:10px;padding:2px 8px;border-radius:99px;
+  background:var(--accent-dim);color:var(--accent);letter-spacing:.03em}
+.hl-input{width:100%;background:var(--bg4);border:1px solid var(--border2);border-radius:var(--r);
+  color:var(--text);font-family:var(--fh);font-size:14px;font-weight:600;padding:10px 14px;
+  outline:none;transition:border-color .15s;letter-spacing:.01em}
+.hl-input::placeholder{color:var(--text3);font-weight:400}
+.hl-input:focus{border-color:var(--accent)}
+.hl-actions{display:flex;gap:8px;margin-top:8px;align-items:center}
+.hl-preview{font-family:var(--fh);font-weight:700;color:var(--accent);font-size:13px;
+  margin-left:auto;text-transform:uppercase;letter-spacing:.04em;
+  max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .btn-cancel{font-family:var(--fh);font-size:12px;font-weight:600;padding:6px 14px;
   background:var(--bg3);border:1px solid var(--border2);border-radius:var(--r);
   color:var(--text2);cursor:pointer;transition:all .15s}
@@ -193,7 +230,7 @@ h1 span{color:var(--text3)}
   </header>
 
   <div class="notice">
-    ⚡ Processado pelo servidor — sem instalar nada. Funciona em qualquer computador e sistema operacional.
+    ⚡ Cortes em massa · Unir ou arquivos separados · Legenda Reels (SRT manual ou Whisper automático) · Headline no topo
   </div>
 
   <div id="dropzone" onclick="triggerPick()"
@@ -261,7 +298,8 @@ function onDrop(e) {
 
 function addGroup(file) {
   const g = { id: uid(), file, name: file.name, duration: 0, width: 0, height: 0, fileId: null,
-               cuts: [{ id: uid(), start: 0, end: 0 }] };
+               cuts: [{ id: uid(), start: 0, end: 0 }],
+               srt: null, transcribing: false, headline: '' };
   groups.push(g);
   render(); updateBtn();
 
@@ -306,6 +344,122 @@ function removeCut(gid, cid) {
   if (!g || g.cuts.length <= 1) return;
   g.cuts = g.cuts.filter(c => c.id !== cid);
   render(); updateBtn();
+}
+
+// ── SRT operations ────────────────────────────────────────────────────────────
+function uploadSrt(gid) {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.srt,.vtt,.txt,text/plain';
+  input.onchange = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const g = groups.find(x => x.id === gid);
+      if (!g) return;
+      g.srt = { text, name: file.name };
+      render();
+      toast(`Legenda "${file.name}" carregada!`, 'ok');
+    } catch (err) {
+      toast('Erro ao ler arquivo de legenda', 'err');
+    }
+  };
+  input.click();
+}
+
+function removeSrt(gid) {
+  const g = groups.find(x => x.id === gid);
+  if (!g) return;
+  g.srt = null;
+  render();
+}
+
+function onSrtEdit(gid, text) {
+  const g = groups.find(x => x.id === gid);
+  if (g && g.srt) g.srt.text = text;
+}
+
+async function autoTranscribe(gid) {
+  const g = groups.find(x => x.id === gid); if (!g) return;
+  if (g.transcribing) return;
+  try {
+    g.transcribing = true; render();
+
+    // Upload the file first if not uploaded
+    if (!g.fileId) {
+      const resp = await fetch(`${API}/upload`, {
+        method: 'POST',
+        headers: { 'X-Filename': g.file.name, 'Content-Type': 'application/octet-stream' },
+        body: g.file,
+      });
+      if (!resp.ok) throw new Error(`Upload: ${resp.status}`);
+      const { file_id } = await resp.json();
+      g.fileId = file_id;
+    }
+
+    // Start transcription
+    const procResp = await fetch(`${API}/transcribe`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file_id: g.fileId, language: 'pt' }),
+    });
+    if (!procResp.ok) throw new Error(`Erro: ${procResp.status}`);
+    const { job_id } = await procResp.json();
+
+    // Poll until done
+    for (;;) {
+      await new Promise(r => setTimeout(r, 1200));
+      const sr = await fetch(`${API}/status/${job_id}`);
+      const job = await sr.json();
+      // Update progress text on the card
+      const elProg = document.getElementById(`trans-${gid}`);
+      if (elProg) elProg.textContent = `${job.message || 'Transcrevendo…'} (${job.progress||0}%)`;
+
+      if (job.status === 'done') {
+        g.srt = { text: job.srt || '', name: 'whisper-auto.srt', auto: true };
+        g.transcribing = false;
+        render();
+        toast('Legenda gerada pelo Whisper!', 'ok');
+        return;
+      }
+      if (job.status === 'error') {
+        g.transcribing = false; render();
+        toast('Erro no Whisper: ' + (job.message || ''), 'err');
+        return;
+      }
+    }
+  } catch (err) {
+    g.transcribing = false; render();
+    toast('Erro: ' + err.message, 'err');
+  }
+}
+
+function setHeadline(gid, text) {
+  const g = groups.find(x => x.id === gid);
+  if (g) {
+    g.headline = text;
+    // Update only the preview text without full re-render to preserve focus
+    const prev = document.getElementById(`hl-prev-${gid}`);
+    if (prev) prev.textContent = text ? text.toUpperCase() : '';
+  }
+}
+
+function clearHeadline(gid) {
+  const g = groups.find(x => x.id === gid);
+  if (g) { g.headline = ''; render(); }
+}
+
+function toggleHeadline(gid) {
+  const g = groups.find(x => x.id === gid); if (!g) return;
+  g.showHeadline = !g.showHeadline;
+  render();
+  if (g.showHeadline) {
+    setTimeout(() => {
+      const el = document.getElementById(`hl-input-${gid}`);
+      if (el) el.focus();
+    }, 50);
+  }
 }
 
 // ── Paste timestamps ──────────────────────────────────────────────────────────
@@ -375,6 +529,57 @@ function render() {
       ? `${g.cuts.length} trecho${g.cuts.length > 1 ? 's' : ''} · ${fmtSec(totalSel)} selecionados`
       : 'Carregando…';
 
+    // SRT section
+    let srtHtml = '';
+    if (g.transcribing) {
+      srtHtml = `
+        <div class="srt-area">
+          <div class="srt-transcribing">
+            <span class="spin">⏳</span>
+            <span id="trans-${g.id}">Transcrevendo áudio com Whisper…</span>
+          </div>
+        </div>`;
+    } else if (g.srt) {
+      const autoBadge = g.srt.auto
+        ? `<span class="srt-badge auto">🤖 AUTO</span>`
+        : `<span class="srt-badge">MANUAL</span>`;
+      srtHtml = `
+        <div class="srt-area">
+          <div class="srt-header">
+            <span class="srt-icon">📝</span>
+            <span class="srt-title">Legenda estilo Reels · <span style="color:var(--text2)">${esc(g.srt.name || 'legenda.srt')}</span></span>
+            ${autoBadge}
+          </div>
+          <textarea class="srt-edit" onchange="onSrtEdit('${g.id}', this.value)"
+            placeholder="Cole aqui o conteúdo do SRT…">${esc(g.srt.text)}</textarea>
+          <div class="srt-actions">
+            <button class="btn-cancel" onclick="removeSrt('${g.id}')">Remover legenda</button>
+            <span class="srt-hint">Edite antes de gerar — as legendas serão queimadas no vídeo</span>
+          </div>
+        </div>`;
+    }
+
+    // Headline section
+    const hasHeadline = !!g.headline;
+    const showHl = g.showHeadline || hasHeadline;
+    const hlHtml = showHl ? `
+      <div class="hl-area">
+        <div class="hl-header">
+          <span class="srt-icon">📰</span>
+          <span class="hl-title">Headline no topo do vídeo</span>
+          ${hasHeadline ? '<span class="hl-badge">ATIVO</span>' : ''}
+        </div>
+        <input id="hl-input-${g.id}" class="hl-input" type="text" maxlength="120"
+               placeholder="Ex: VOCÊ PRECISA VER ISSO"
+               value="${esc(g.headline || '')}"
+               oninput="setHeadline('${g.id}', this.value)"/>
+        <div class="hl-actions">
+          <button class="btn-cancel" onclick="clearHeadline('${g.id}')">${hasHeadline ? 'Remover headline' : 'Fechar'}</button>
+          <span class="hl-preview" id="hl-prev-${g.id}">${esc((g.headline || '').toUpperCase())}</span>
+        </div>
+      </div>
+    ` : '';
+
     const card = document.createElement('div');
     card.className = 'file-card';
     card.innerHTML = `
@@ -393,6 +598,11 @@ function render() {
       <div class="file-footer">
         <button class="btn-pill" onclick="addCut('${g.id}')">+ Trecho</button>
         <button class="btn-pill paste" onclick="showPaste('${g.id}')">📋 Colar timestamps</button>
+        ${g.srt || g.transcribing ? '' : `
+          <button class="btn-pill paste" onclick="uploadSrt('${g.id}')">📝 SRT</button>
+          <button class="btn-pill paste" onclick="autoTranscribe('${g.id}')" style="color:var(--green);border-color:rgba(74,222,128,.3)">🤖 Auto (Whisper)</button>
+        `}
+        ${showHl ? '' : `<button class="btn-pill paste" onclick="toggleHeadline('${g.id}')">📰 Headline</button>`}
         <span class="file-info">${info}</span>
       </div>
       <div class="paste-area" id="paste-${g.id}">
@@ -402,7 +612,9 @@ function render() {
           <button class="btn-cancel" onclick="hidePaste('${g.id}')">Cancelar</button>
           <button class="btn-apply" onclick="applyPaste('${g.id}')">Adicionar trechos</button>
         </div>
-      </div>`;
+      </div>
+      ${hlHtml}
+      ${srtHtml}`;
     container.appendChild(card);
   });
 
@@ -489,12 +701,19 @@ async function generate() {
       seen.set(g.file, file_id);
     }
 
-    // Flatten groups → clips
+    // Flatten groups → clips (SRT + headline per group applied to each cut)
     const clipsPayload = [];
     for (const g of groups) {
+      const srtText  = g.srt ? g.srt.text : null;
+      const headline = (g.headline || '').trim() || null;
       for (const c of g.cuts) {
-        clipsPayload.push({ file_id: g.fileId, start: c.start, end: c.end,
-                            width: g.width || 0, height: g.height || 0 });
+        clipsPayload.push({
+          file_id: g.fileId,
+          start: c.start, end: c.end,
+          width: g.width || 0, height: g.height || 0,
+          srt: srtText,
+          headline: headline,
+        });
       }
     }
 
